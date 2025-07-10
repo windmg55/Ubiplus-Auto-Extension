@@ -9,12 +9,27 @@ import re
 import json
 import os
 import threading
+# --- 업데이트 기능에 필요한 라이브러리 ---
+import requests
+import sys
+import subprocess
 
 class ExpiryExtensionApp:
     def __init__(self, root):
         self.root = root
         self.root.title("만료일 자동연장 프로그램")
         self.root.geometry("600x550")
+        
+        # ========================================================
+        # ======== 업데이트 기능 관련 설정 (신규) START ========
+        # ========================================================
+        # 현재 프로그램 버전 (새 버전 배포 시 이 번호를 올려주세요)
+        self.CURRENT_VERSION = "1.0" 
+        # 고객님의 GitHub 저장소 주소 (예: "username/repository-name")
+        self.GITHUB_REPO = "YOUR_USERNAME/YOUR_REPOSITORY_NAME" 
+        # ========================================================
+        # ========= 업데이트 기능 관련 설정 (신규) END =========
+        # ========================================================
         
         # --- 기본 설정값 ---
         self.default_server = "116.122.36.35,1433"
@@ -35,7 +50,6 @@ class ExpiryExtensionApp:
         container.grid_columnconfigure(0, weight=1)
         
         self.frames = {}
-        # 각 페이지(프레임) 생성
         for F in (ExtensionPage, CalculatorPage):
             page_name = F.__name__
             frame = F(parent=container, controller=self)
@@ -44,20 +58,106 @@ class ExpiryExtensionApp:
 
         # --- 초기 UI 설정 ---
         self.setup_menu()
-        self.show_frame("ExtensionPage") # 시작 화면 설정
+        self.show_frame("ExtensionPage") 
 
         # --- 단축키 및 프로토콜 설정 ---
         self.root.bind("<F5>", self.process_sms)
         self.root.bind("<F4>", self.clear_and_paste)
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+        
+        # --- 프로그램 시작 시 업데이트 확인 ---
+        self.root.title(f"만료일 자동연장 프로그램 v{self.CURRENT_VERSION}")
+        threading.Thread(target=self.check_for_updates, daemon=True).start()
 
+    # ========================================================
+    # ======== 업데이트 기능 관련 함수 (신규) START ========
+    # ========================================================
+    def check_for_updates(self):
+        """GitHub API를 통해 최신 릴리즈 정보를 확인하고 업데이트를 제안합니다."""
+        try:
+            # GitHub 저장소 주소를 정확히 입력해주세요.
+            if self.GITHUB_REPO == "YOUR_USERNAME/YOUR_REPOSITORY_NAME":
+                print("업데이트: GitHub 저장소 정보가 설정되지 않았습니다.")
+                return
+
+            api_url = f"https://api.github.com/repos/{self.GITHUB_REPO}/releases/latest"
+            response = requests.get(api_url)
+            response.raise_for_status() # 오류가 있으면 예외 발생
+            
+            latest_release = response.json()
+            latest_version = latest_release["tag_name"].lstrip('v') # 'v1.1' -> '1.1'
+            
+            # 버전 비교 (간단한 문자열 비교, 필요시 더 정교한 비교 로직 사용 가능)
+            if latest_version > self.CURRENT_VERSION:
+                if messagebox.askyesno("업데이트 알림", f"새로운 버전(v{latest_version})이 있습니다. 지금 업데이트하시겠습니까?"):
+                    asset = latest_release["assets"][0]
+                    download_url = asset["browser_download_url"]
+                    filename = asset["name"]
+                    
+                    # 다운로드 및 업데이트는 GUI가 멈추지 않도록 새 스레드에서 실행
+                    threading.Thread(target=self.download_and_apply_update, args=(download_url, filename), daemon=True).start()
+    
+        except requests.exceptions.RequestException as e:
+            print(f"업데이트 확인 중 네트워크 오류 발생: {e}")
+        except Exception as e:
+            print(f"업데이트 확인 중 오류 발생: {e}")
+
+    def download_and_apply_update(self, url, new_filename):
+        """새 버전 파일을 다운로드하고, 교체 스크립트를 실행합니다."""
+        try:
+            # 메인 페이지의 상태 라벨에 진행 상황 표시
+            status_label = self.frames["ExtensionPage"].status_label
+            status_label.config(text=f"업데이트 다운로드 중... 0%", foreground="blue")
+            self.root.update_idletasks()
+
+            response = requests.get(url, stream=True)
+            response.raise_for_status()
+
+            # 다운로드할 파일 경로 설정 (기존 파일명에 '_new' 추가)
+            base_name, ext = os.path.splitext(os.path.basename(sys.executable))
+            download_path = f"{base_name}_new{ext}"
+            
+            total_size = int(response.headers.get('content-length', 0))
+            bytes_downloaded = 0
+            
+            with open(download_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+                    bytes_downloaded += len(chunk)
+                    progress = int((bytes_downloaded / total_size) * 100) if total_size > 0 else 0
+                    status_label.config(text=f"업데이트 다운로드 중... {progress}%")
+                    self.root.update_idletasks()
+
+            status_label.config(text="다운로드 완료. 프로그램을 재시작합니다.", foreground="green")
+
+            # 현재 실행 파일의 전체 경로
+            current_exe_path = sys.executable
+            # 업데이트 스크립트(updater.bat) 생성
+            updater_script_path = "updater.bat"
+            with open(updater_script_path, "w") as f:
+                f.write(f"@echo off\n")
+                f.write(f"echo 프로그램을 업데이트하는 중입니다. 잠시만 기다려주세요...\n")
+                f.write(f"timeout /t 2 /nobreak > nul\n") # 기존 프로그램이 완전히 종료될 때까지 대기
+                f.write(f"move /y \"{download_path}\" \"{current_exe_path}\"\n") # 새 파일로 덮어쓰기
+                f.write(f"start \"\" \"{current_exe_path}\"\n") # 새 버전 실행
+                f.write(f"del \"{updater_script_path}\"\n") # 업데이터 자신 삭제
+
+            # .bat 파일 실행하고 현재 프로그램 종료
+            subprocess.Popen(updater_script_path, shell=True)
+            sys.exit()
+
+        except Exception as e:
+            messagebox.showerror("업데이트 실패", f"업데이트 중 오류가 발생했습니다: {e}")
+            status_label.config(text="업데이트 실패", foreground="red")
+    # ========================================================
+    # ========= 업데이트 기능 관련 함수 (신규) END =========
+    # ========================================================
+    
     def show_frame(self, page_name):
-        '''지정된 이름의 프레임을 화면에 표시합니다.'''
         frame = self.frames[page_name]
         frame.tkraise()
 
     def setup_menu(self):
-        '''상단 메뉴를 설정합니다.'''
         menubar = Menu(self.root)
         self.root.config(menu=menubar)
 
@@ -102,8 +202,7 @@ class CalculatorPage(tk.Frame):
         label = ttk.Label(self, text="여기는 '연장 계산하기' 화면입니다.\n이곳에 새로운 기능을 추가할 수 있습니다.", font=("맑은 고딕", 12))
         label.pack(side="top", fill="both", expand=True, padx=20, pady=20)
 
-
-# --- '연장하기' 페이지 (기존 UI) ---
+# --- '연장하기' 페이지 ---
 class ExtensionPage(tk.Frame):
     def __init__(self, parent, controller):
         tk.Frame.__init__(self, parent)
@@ -152,9 +251,6 @@ class ExtensionPage(tk.Frame):
         else:
             self.writer_combobox.current(0)
 
-        # ========================================================
-        # ======== 체크박스 분리 (고객님 요청사항) START ========
-        # ========================================================
         self.memo_record_enabled = tk.BooleanVar(value=True)
         self.memo_record_checkbox = ttk.Checkbutton(memo_frame, text="상담기록", variable=self.memo_record_enabled)
         self.memo_record_checkbox.grid(row=0, column=2, sticky=tk.W, pady=2, padx=(20, 0))
@@ -162,9 +258,6 @@ class ExtensionPage(tk.Frame):
         self.sales_record_enabled = tk.BooleanVar(value=True)
         self.sales_record_checkbox = ttk.Checkbutton(memo_frame, text="판매기록", variable=self.sales_record_enabled)
         self.sales_record_checkbox.grid(row=0, column=3, sticky=tk.W, pady=2, padx=(10, 0))
-        # ========================================================
-        # ========= 체크박스 분리 (고객님 요청사항) END =========
-        # ========================================================
         
         sms_frame = ttk.LabelFrame(main_frame, text="문자 정보", padding="10")
         sms_frame.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
@@ -191,7 +284,6 @@ class ExtensionPage(tk.Frame):
         self.status_label = ttk.Label(main_frame, text="준비됨", foreground="green")
         self.status_label.grid(row=4, column=0, columnspan=2, pady=5)
         
-        # Grid weight 설정
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
         main_frame.columnconfigure(1, weight=1)
@@ -200,6 +292,7 @@ class ExtensionPage(tk.Frame):
         sms_frame.columnconfigure(0, weight=1)
         sms_frame.rowconfigure(1, weight=1)
 
+    # (ExtensionPage의 나머지 함수들은 이전과 동일하게 유지됩니다)
     def clear_and_paste(self, event=None):
         try:
             clipboard_content = self.controller.root.clipboard_get()
@@ -374,17 +467,12 @@ class ExtensionPage(tk.Frame):
                     params.append(cdkey)
                     cursor.execute(f"UPDATE tb_purchase SET {', '.join(update_parts)} WHERE cdkey = ?", params)
             
-            # ========================================================
-            # ======== 기록 로직 분리 (고객님 요청사항) START ========
-            # ========================================================
-            # 판매 기록 처리
             if self.sales_record_enabled.get():
                 print("--- 판매기록 생성 시작 ---")
                 self.create_new_sales_record(cursor, representative_user_idx, writer_name, employee_idx)
             else:
                 print("--- 판매기록 건너뜀 (체크 해제됨) ---")
 
-            # 상담 기록 처리
             if self.memo_record_enabled.get():
                 if memo_log_by_key:
                     print("--- 상담기록 생성 시작 ---")
@@ -399,9 +487,6 @@ class ExtensionPage(tk.Frame):
                     print("--- 기록할 상담 내용이 없어 상담기록 건너뜀 ---")
             else:
                 print("--- 상담기록 건너뜀 (체크 해제됨) ---")
-            # ========================================================
-            # ========= 기록 로직 분리 (고객님 요청사항) END =========
-            # ========================================================
 
             conn.commit()
             return True, f"{len(cdkeys)}개의 인증키에 대한 만료일 연장 및 관련 기록 처리가 완료되었습니다."
@@ -463,6 +548,7 @@ class ExtensionPage(tk.Frame):
         threading.Thread(target=process_thread, daemon=True).start()
 
 def main():
+    # main 함수는 변경사항 없습니다.
     try:
         from dateutil.relativedelta import relativedelta
     except ImportError:
